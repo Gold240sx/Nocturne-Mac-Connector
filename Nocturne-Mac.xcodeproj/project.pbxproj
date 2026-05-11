@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A5A5A5A5A5A5A5A5A5A5A5A5 /* MediaRemoteAdapter in Frameworks */ = {isa = PBXBuildFile; productRef = A1A1A1A1A1A1A1A1A1A1A1A1 /* MediaRemoteAdapter */; };
+		A6A6A6A6A6A6A6A6A6A6A6A6 /* MediaRemoteAdapter in Embed Frameworks */ = {isa = PBXBuildFile; productRef = A1A1A1A1A1A1A1A1A1A1A1A1 /* MediaRemoteAdapter */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		E6138DF62FB2360A00FC9881 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -22,6 +27,20 @@
 			remoteInfo = "Nocturne-Mac";
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A4A4A4A4A4A4A4A4A4A4A4A4 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A6A6A6A6A6A6A6A6A6A6A6A6 /* MediaRemoteAdapter in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		E6138DE62FB2360700FC9881 /* Nocturne-Mac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Nocturne-Mac.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -52,6 +71,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5A5A5A5A5A5A5A5A5A5A5A5 /* MediaRemoteAdapter in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -102,6 +122,7 @@
 				E6138DE22FB2360700FC9881 /* Sources */,
 				E6138DE32FB2360700FC9881 /* Frameworks */,
 				E6138DE42FB2360700FC9881 /* Resources */,
+				A4A4A4A4A4A4A4A4A4A4A4A4 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -112,6 +133,7 @@
 			);
 			name = "Nocturne-Mac";
 			packageProductDependencies = (
+				A1A1A1A1A1A1A1A1A1A1A1A1 /* MediaRemoteAdapter */,
 			);
 			productName = "Nocturne-Mac";
 			productReference = E6138DE62FB2360700FC9881 /* Nocturne-Mac.app */;
@@ -195,6 +217,9 @@
 			);
 			mainGroup = E6138DDD2FB2360700FC9881;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A2A2A2A2A2A2A2A2A2A2A2A2 /* XCRemoteSwiftPackageReference "mediaremote-adapter" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E6138DE72FB2360700FC9881 /* Products */;
 			projectDirPath = "";
@@ -398,12 +423,27 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 3M7PED79H5;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Nocturne Connector reads Spotify's current track and sends play/pause/next/previous commands.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Nocturne Connector needs Bluetooth to pair with the Spotify Car Thing and open the RFCOMM data channel.";
+				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "Nocturne Connector communicates with the Car Thing over Bluetooth.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMainStoryboardFile = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -430,12 +470,27 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 3M7PED79H5;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Nocturne Connector reads Spotify's current track and sends play/pause/next/previous commands.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Nocturne Connector needs Bluetooth to pair with the Spotify Car Thing and open the RFCOMM data channel.";
+				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "Nocturne Connector communicates with the Car Thing over Bluetooth.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMainStoryboardFile = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -573,6 +628,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A2A2A2A2A2A2A2A2A2A2A2A2 /* XCRemoteSwiftPackageReference "mediaremote-adapter" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ejbills/mediaremote-adapter.git";
+			requirement = {
+				branch = master;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1A1A1A1A1A1A1A1A1A1A1A1 /* MediaRemoteAdapter */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A2A2A2A2A2A2A2A2A2A2A2A2 /* XCRemoteSwiftPackageReference "mediaremote-adapter" */;
+			productName = MediaRemoteAdapter;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E6138DDE2FB2360700FC9881 /* Project object */;
 }

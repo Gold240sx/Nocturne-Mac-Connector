@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>codebaseID</key>
+	<string>14D9E7CC-6DEA-4380-B2F0-49680C19BC8F</string>
+	<key>codebaseName</key>
+	<string>Nocturne Mac</string>
+	<key>createdAt</key>
+	<string>2026-05-11T19:23:49Z</string>
+	<key>createdBy</key>
+	<string>DevSpace</string>
+	<key>projectID</key>
+	<string>F1FFE91F-7A59-46C6-897B-AC4A3E4D0225</string>
+	<key>version</key>
+	<string>1.0</string>
+</dict>
+</plist>

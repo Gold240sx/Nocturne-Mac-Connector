@@ -1,32 +1,53 @@
-//
-//  Nocturne_MacApp.swift
-//  Nocturne-Mac
-//
-//  Created by Michael Martell on 5/11/26.
-//
-
 import SwiftUI
-import SwiftData
 
 @main
 struct Nocturne_MacApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+    @StateObject private var auth = AuthService()
+    @StateObject private var spotify: SpotifyService
+    @StateObject private var bluetooth = BluetoothService()
+    @StateObject private var analytics = AnalyticsService()
+    @StateObject private var nowPlaying: NowPlayingService
+    @StateObject private var rpc: RPCManager
 
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    init() {
+        let spotify = SpotifyService()
+        let now = NowPlayingService(spotify: spotify)
+        let rpcManager = RPCManager(spotify: spotify, nowPlaying: now)
+        _spotify = StateObject(wrappedValue: spotify)
+        _nowPlaying = StateObject(wrappedValue: now)
+        _rpc = StateObject(wrappedValue: rpcManager)
+    }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        WindowGroup("Nocturne Connector") {
+            rootContent
+                .frame(minWidth: 900, minHeight: 640)
         }
-        .modelContainer(sharedModelContainer)
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
+
+        Settings {
+            EmptyView()
+        }
+    }
+
+    private var rootContent: some View {
+        RootView()
+            .environmentObject(auth)
+            .environmentObject(spotify)
+            .environmentObject(bluetooth)
+            .environmentObject(analytics)
+            .environmentObject(nowPlaying)
+            .environmentObject(rpc)
+            .task {
+                // Hook the RPC manager into the Bluetooth service so RFCOMM
+                // channels are bridged into the msgpack RPC layer.
+                bluetooth.rpcManager = rpc
+                await auth.initialize()
+                await spotify.bootstrap()
+            }
     }
 }
