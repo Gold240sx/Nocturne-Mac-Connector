@@ -26,6 +26,8 @@ Things I'd like to do in the future to improve it:
 
 I was able to  get the now playing from nearly any source on the Mac (Spotify, Youtube, Apple Music) into the app itself, which wasn't easy because Apple depricated the MediaRemote API in macOS 14.4. Thankfully I found a workaround with Ejbills package MediaRemoteAdapter linked below. This however is not in place due to how Nocturne currently works... this feature could be added pretty easily by adding a conditional function call to behave differently if the connector is the Mac Connect, and if so if the player is not Spotify etc, but each button was configured seperately and I didn't want to dive into making any changes to the firmware... yet. But with that, it really shouldn't be all that hard, and then the Now playing feature (show playing info from any source) would match the current state of the iOS-based connector, so for the sake of cohesion, it would be a nice addition.
 
+Another thing I'd consider is having an open on launch option (again, easy fix), as well as a way to hide from the dock and view only in the menu bar (also easy fix).
+
 Nocturne Firmware: [Nocturne Firmware Repo](https://github.com/usenocturne/nocturne)
 Nocturne Connect Repo: [Nocturne Connect Repo](https://github.com/usenocturne/nocturne-connector)
 Nocturne Website: [Nocturne Website](https://usenocturne.com)
