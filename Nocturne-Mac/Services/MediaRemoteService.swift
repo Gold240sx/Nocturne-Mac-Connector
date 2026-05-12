@@ -162,10 +162,12 @@ final class MediaRemoteService {
         )
 
         accessState = (info.title?.isEmpty ?? true) ? .empty : .ok
-        if let title = info.title, !title.isEmpty {
-            let app = info.applicationName ?? "?"
-            log.info("MediaRemote: title=\(title, privacy: .public) app=\(app, privacy: .public) playing=\(info.isPlaying ?? false, privacy: .public)")
-        }
+        // Per-update logging is firehose-loud during debugging — comment out
+        // when you don't need to confirm MediaRemote is wired up.
+        // if let title = info.title, !title.isEmpty {
+        //     let app = info.applicationName ?? "?"
+        //     log.info("MediaRemote: title=\(title, privacy: .public) app=\(app, privacy: .public) playing=\(info.isPlaying ?? false, privacy: .public)")
+        // }
         onUpdate?(state)
     }
     #endif

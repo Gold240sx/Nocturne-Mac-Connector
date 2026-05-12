@@ -27,6 +27,18 @@ enum RPCMessage {
                 (.string("params"), params)
             ])
         case .result(let id, let result):
+            // Use `type: "result"` over RFCOMM. There are TWO layers here
+            // with different expectations:
+            //   1. `nocturned` (Rust daemon on the Car Thing) deserializes
+            //      our msgpack reply into its `MsgPackMessage` enum, which
+            //      uses `#[serde(rename = "result")]`. Sending "response"
+            //      makes the message unparseable — the daemon drops it
+            //      silently and the WebSocket never sees the reply.
+            //   2. `nocturne-ui` (WebView) listens for `type === "response"`
+            //      because nocturned re-tags Result → response before
+            //      forwarding to the WebSocket.
+            // So the over-the-wire type from us MUST be "result". nocturned
+            // does the rename to "response" downstream.
             mp = .map([
                 (.string("type"), .string("result")),
                 (.string("id"), .string(id)),
@@ -61,7 +73,10 @@ enum RPCMessage {
             }
             let params = value.mapValue("params") ?? .nilValue
             return .call(id: id, method: method, params: params)
-        case "result":
+        case "result", "response":
+            // Accept both `result` (Pi connector's documented protocol) and
+            // `response` (what the firmware actually emits/expects). Keeps
+            // us interoperable in both directions.
             guard let id = value.mapValue("id")?.stringValue else {
                 throw MessagePackError.malformed("result missing id")
             }

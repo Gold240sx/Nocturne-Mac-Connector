@@ -541,6 +541,19 @@ final class BluetoothService: ObservableObject {
         rpcManager?.detach(channel: channel, address: address)
         log.info("RFCOMM channel closed: \(address, privacy: .public) ch=\(chID, privacy: .public)")
 
+        // If the RPC channel (ch != serverChannel) just died, the inbound
+        // ch 1 is now useless on its own — RPC won't flow over it (wrong
+        // wire format) and keeping it open keeps the Dashboard's "Connected"
+        // pill lit while nothing actually works. Tear down the whole peer.
+        if chID != server.registeredChannel {
+            let staleKeys = activeChannels.keys.filter { $0.hasPrefix("\(address)#") }
+            for key in staleKeys {
+                if let ch = activeChannels.removeValue(forKey: key) {
+                    ch.close()
+                }
+            }
+        }
+
         // Only mark the device as disconnected when ALL channels to it are gone.
         let stillConnected = activeChannels.keys.contains(where: { $0.hasPrefix("\(address)#") })
         if !stillConnected {
@@ -548,6 +561,9 @@ final class BluetoothService: ObservableObject {
             if let idx = devices.firstIndex(where: { $0.address == address }) {
                 devices[idx].connected = false
             }
+            // Reset the peer-rejection cooldown so the user (or our auto
+            // retry) can try again without waiting for the 60s window.
+            peerConnectability[address] = .unknown
         } else {
             // At least one channel remains — just drop this specific devicePath entry.
             let devicePath = "rfcomm-\(chID == 1 ? "server" : "client"):\(address)"

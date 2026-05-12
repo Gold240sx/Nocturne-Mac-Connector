@@ -359,6 +359,16 @@ final class RPCManager: ObservableObject {
                     log.warning("spotify.image.fetch HTTP \(http.statusCode, privacy: .public) for \(urlStr, privacy: .public)")
                     return (.nilValue, "image fetch HTTP \(http.statusCode)")
                 }
+                // Must return base64 STRING (not msgpack `bin`). The Car
+                // Thing's nocturned daemon converts msgpack → JSON before
+                // handing the message to the UI WebView (the UI parses with
+                // `JSON.parse(event.data)`). JSON has no binary type, so
+                // msgpack-bin values become either a number-array or a
+                // `{type:"Buffer",data:[...]}` object — neither of which
+                // matches the firmware's `imageData instanceof Uint8Array`
+                // check. A base64 string survives JSON intact and hits the
+                // firmware's `typeof imageData === "string"` branch, which
+                // builds the data: URL it can actually render.
                 let base64 = data.base64EncodedString()
                 log.info("spotify.image.fetch ok: \(data.count, privacy: .public) bytes (b64 \(base64.count, privacy: .public)) from \(urlStr, privacy: .public)")
                 return (.map([
@@ -764,7 +774,7 @@ final class RPCManager: ObservableObject {
             //   REST `context.uri`                → cluster `context_uri`
             let json = try JSONSerialization.jsonObject(with: data)
             let restPlayer = MessagePackValue.wrap(json)
-            let wrapped = buildClusterFromRESTPlayer(restPlayer)
+            let wrapped = await buildClusterFromRESTPlayer(restPlayer)
             cachedPlayerState = (wrapped, Date())
             cacheNeedsRefresh = false
             return wrapped
@@ -801,13 +811,45 @@ final class RPCManager: ObservableObject {
         return isPlaying
     }
 
+    /// Per-image data-URL cache. Built by `buildClusterFromRESTPlayer` when
+    /// it needs an inlined image — we want each unique remote image URL to
+    /// be fetched and base64-encoded ONCE, then re-used on every subsequent
+    /// cluster broadcast for the same track. Cleared when it grows past a
+    /// few entries so we don't leak memory across many tracks.
+    private var imageDataURLCache: [String: String] = [:]
+
+    /// Fetch a Spotify image URL, base64-encode it, and return a fully-formed
+    /// `data:image/jpeg;base64,<...>` URL. Returns nil on any error so the
+    /// caller can fall back to the remote URL. Cached per remote URL.
+    private func dataURLForImage(_ remoteURL: String) async -> String? {
+        if let cached = imageDataURLCache[remoteURL] {
+            return cached
+        }
+        guard let url = URL(string: remoteURL) else { return nil }
+        do {
+            let (data, http) = try await api.request(url, method: "GET")
+            guard (200..<300).contains(http.statusCode) else { return nil }
+            let mime = http.value(forHTTPHeaderField: "Content-Type") ?? "image/jpeg"
+            let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
+            // Keep the cache bounded — Spotify images don't change often
+            // within a session, but over time tracks pile up.
+            if imageDataURLCache.count > 32 {
+                imageDataURLCache.removeAll()
+            }
+            imageDataURLCache[remoteURL] = dataURL
+            return dataURL
+        } catch {
+            return nil
+        }
+    }
+
     /// Translate a Spotify REST `/v1/me/player` response (parsed JSON) into
     /// the Spotify Connect WebSocket cluster shape the Car Thing firmware
     /// reads. The firmware was built against the Pi connector's
     /// `cleanupWebSocketMessage` output — same envelope, but the player_state
     /// inside has WebSocket-style field names (track.metadata.title, etc.),
     /// not REST-style (item.name).
-    private func buildClusterFromRESTPlayer(_ rest: MessagePackValue) -> MessagePackValue {
+    private func buildClusterFromRESTPlayer(_ rest: MessagePackValue) async -> MessagePackValue {
         let item = rest.mapValue("item")
         let album = item?.mapValue("album")
         let artists = item?.mapValue("artists")?.arrayValue ?? []
@@ -815,23 +857,35 @@ final class RPCManager: ObservableObject {
         let title = item?.mapValue("name")?.stringValue ?? ""
         let artistName = artists.first?.mapValue("name")?.stringValue ?? ""
         let albumTitle = album?.mapValue("name")?.stringValue ?? ""
-        // Spotify returns three image sizes (640/300/64). We want the smallest
-        // viable one for the cluster's `image_url` so the firmware's fetch
-        // stays fast — 200KB+ images at the default chunk size take >700ms to
-        // transit RFCOMM and may exceed the firmware's reassembly window.
-        // Pick the medium (300x300) when present, else the largest (the
-        // smallest, 64x64, is too low-res for the player UI).
+        // Spotify returns three image sizes (640/300/64). The Car Thing's
+        // embedded WebView reliably renders the 64x64 size; 300x300 and
+        // 640x640 silently fail at the color-extraction step (img.onload
+        // never fires for ~30KB+ base64 data URLs in the WebView). 64x64
+        // up-scales to the 280x280 slot — softer than ideal but actually
+        // visible. TODO: progressive enhancement — serve 64x64 first then
+        // swap in the medium image once we know it's safe.
         let imageList = album?.mapValue("images")?.arrayValue ?? []
-        let imageURL: String = {
-            // Prefer middle-sized image: skip 640x and find 300-ish.
+        let remoteImageURL: String = {
+            // Smallest first (height <= 100, picks the 64x64 thumbnail).
+            for img in imageList {
+                if let h = img.mapValue("height")?.intValue, h <= 100 {
+                    return img.mapValue("url")?.stringValue ?? ""
+                }
+            }
+            // Fall back to medium if no small version is returned.
             for img in imageList {
                 if let h = img.mapValue("height")?.intValue, h >= 200 && h <= 400 {
                     return img.mapValue("url")?.stringValue ?? ""
                 }
             }
-            // Fall back to first available.
             return imageList.first?.mapValue("url")?.stringValue ?? ""
         }()
+        // Keep the remote https URL — the firmware unconditionally prepends
+        // `https://` to any image_url that doesn't start with `http`, which
+        // turns a `data:image/...` URL into a broken `https://data:image/...`.
+        // Inlining the image bytes doesn't work via the cluster path; the
+        // firmware always fetches via `spotify.image.fetch` from this URL.
+        let imageURL = remoteImageURL
         let trackURI = item?.mapValue("uri")?.stringValue ?? ""
         let durationMs = item?.mapValue("duration_ms")?.intValue ?? 0
         let progressMs = rest.mapValue("progress_ms")?.intValue ?? 0
