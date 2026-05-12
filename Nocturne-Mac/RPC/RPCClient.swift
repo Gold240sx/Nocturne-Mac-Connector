@@ -24,6 +24,9 @@ final class RPCClient {
     private let assembler = ChunkedMessageAssembler()
     private var pendingRequests: [String: CheckedContinuation<MessagePackValue, Error>] = [:]
     private var pendingTimers: [String: Task<Void, Never>] = [:]
+    /// Counter so the first few base64-decode failures dump hex; subsequent
+    /// failures just log a short summary to avoid flooding the log.
+    private var invalidBase64SampleCount = 0
 
     init(id: String) {
         self.id = id
@@ -48,7 +51,17 @@ final class RPCClient {
             if trimmed.isEmpty { continue }
 
             guard let decoded = Data(base64Encoded: trimmed, options: [.ignoreUnknownCharacters]) else {
-                log.warning("Invalid base64 line (\(line.count, privacy: .public) bytes)")
+                // Dump the first few bad lines as hex so we can see what's
+                // actually coming over the wire — iAP2 frames start with
+                // `FF 5A`, raw JSON with `7B` (`{`), raw msgpack varies.
+                if invalidBase64SampleCount < 3 {
+                    invalidBase64SampleCount += 1
+                    let preview = trimmed.prefix(48).map { String(format: "%02X", $0) }.joined(separator: " ")
+                    let asciiPreview = String(data: trimmed.prefix(48), encoding: .ascii) ?? "<not ascii>"
+                    log.warning("Invalid base64 line (\(line.count, privacy: .public) bytes) hex: \(preview, privacy: .public) ascii: \(asciiPreview, privacy: .public)")
+                } else {
+                    log.warning("Invalid base64 line (\(line.count, privacy: .public) bytes)")
+                }
                 continue
             }
 

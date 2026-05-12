@@ -3,6 +3,12 @@ import os
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(Carbon)
+import Carbon
+#endif
+#if canImport(ApplicationServices)
+import ApplicationServices
+#endif
 
 /// Reads Spotify's currently-playing track via AppleScript, talking directly to
 /// the running Spotify.app. This is the only way to get track metadata on
@@ -241,15 +247,47 @@ final class SpotifyAppleScriptReader {
     }
 
     /// Explicitly trigger the macOS Automation TCC prompt for Spotify.
-    /// Useful when the implicit first-run prompt was missed or dismissed and
-    /// macOS now caches the denial. We just run a harmless AppleScript against
-    /// Spotify — that's the same trigger the OS uses, but it'll re-prompt if
-    /// the user hasn't been asked yet, or open the privacy pane otherwise.
+    ///
+    /// macOS's Automation pane has no "+" button — apps only appear there
+    /// after they make a recognized Apple-Events request against the target.
+    /// `AEDeterminePermissionToAutomateTarget` is the documented API for
+    /// forcing that registration: with `askUserIfNeeded: true` it pops the
+    /// consent dialog and (regardless of the user's answer) adds Nocturne-Mac
+    /// to the Automation list so the toggle is reachable from then on.
+    ///
+    /// NSAppleScript is used as a fallback because some macOS versions silently
+    /// skip the TCC dialog from the AE API when the calling app hasn't yet
+    /// shown an active window.
     @discardableResult
     func requestAutomationPermission() -> Bool {
-        // The most reliable way to surface the TCC prompt is to make a real
-        // Apple Events call. If the user already denied it, this will fail
-        // with -1743 again and we'll open System Settings as a fallback.
+        #if canImport(Carbon)
+        let aeStatus = requestPermissionViaAE()
+        // Logged at .warning so it stands out in Console — this is the line
+        // to look for if Nocturne-Mac isn't showing up under System Settings
+        // → Privacy & Security → Automation. A status of `0` means TCC
+        // recorded our intent (the system prompt should also have appeared);
+        // `-1743` means the user previously denied us; `-600` means Spotify
+        // wasn't running yet so AE couldn't even ask TCC.
+        log.warning("requestAutomationPermission: AE status=\(aeStatus, privacy: .public) for com.spotify.client")
+
+        switch aeStatus {
+        case noErr:
+            accessState = .ok
+            return true
+        case OSStatus(errAEEventNotPermitted):
+            accessState = .permissionDenied
+            openAutomationSettings()
+            return false
+        default:
+            // -600 procNotFound (Spotify not running), or other errors — fall
+            // through to NSAppleScript, which also force-launches Spotify.
+            break
+        }
+        #endif
+
+        // Fallback path: real AppleScript. Targeting Spotify by name forces
+        // macOS to launch it if it isn't already running, which is sometimes
+        // required before the TCC machinery will fire.
         let src = """
         tell application "Spotify"
             return name
@@ -260,7 +298,7 @@ final class SpotifyAppleScriptReader {
         _ = script?.executeAndReturnError(&errorInfo)
         if let errorInfo {
             let code = (errorInfo[NSAppleScript.errorNumber] as? Int) ?? 0
-            log.info("requestAutomationPermission: AppleScript code=\(code)")
+            log.info("requestAutomationPermission: NSAppleScript code=\(code, privacy: .public)")
             if code == -1743 || code == -600 {
                 accessState = .permissionDenied
                 openAutomationSettings()
@@ -270,6 +308,48 @@ final class SpotifyAppleScriptReader {
         accessState = .ok
         return true
     }
+
+    #if canImport(Carbon)
+    /// Calls `AEDeterminePermissionToAutomateTarget` against Spotify's bundle
+    /// ID. This is the documented mechanism for an app to declare its intent
+    /// to send Apple Events to another app — calling it once with
+    /// `askUserIfNeeded: true` is what makes Nocturne-Mac appear in
+    /// System Settings → Privacy & Security → Automation under Spotify.
+    private func requestPermissionViaAE() -> OSStatus {
+        let bundleID = "com.spotify.client"
+        guard let bidData = bundleID.data(using: .utf8) else {
+            return OSStatus(paramErr)
+        }
+        var targetDesc = AEAddressDesc()
+        // AECreateDesc returns OSErr (Int16); widen to OSStatus (Int32).
+        let descStatus: OSStatus = bidData.withUnsafeBytes { rawBuf -> OSStatus in
+            guard let base = rawBuf.baseAddress else { return OSStatus(paramErr) }
+            let raw = AECreateDesc(
+                DescType(typeApplicationBundleID),
+                base,
+                bidData.count,
+                &targetDesc
+            )
+            return OSStatus(raw)
+        }
+        if descStatus != noErr { return descStatus }
+        defer { AEDisposeDesc(&targetDesc) }
+
+        // IMPORTANT: pick an event class/ID that *requires* automation
+        // permission. `kAEOpenApplication` ('oapp') is the lifecycle launch
+        // event — it's allowed without automation consent, so calling
+        // AEDeterminePermissionToAutomateTarget with it does NOT register the
+        // app under System Settings → Automation. `kAECoreSuite` + `kAEGetData`
+        // ('core'/'getd') is what AppleScript uses for property access, which
+        // is real automation, and forces the TCC dialog + registration.
+        return AEDeterminePermissionToAutomateTarget(
+            &targetDesc,
+            AEEventClass(kAECoreSuite),
+            AEEventID(kAEGetData),
+            true
+        )
+    }
+    #endif
 
     /// Seek to a position in the current track (milliseconds from start).
     func seek(positionMs: Int) {

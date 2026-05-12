@@ -1,17 +1,29 @@
 import Foundation
 import os
 import Combine
+import CryptoKit
 #if canImport(AppKit)
 import AppKit
 #endif
 
-/// Spotify Device Authorization flow, ported from the core paths of
-/// src/server/services/spotify-service.ts.
+/// Spotify Authorization Code + PKCE flow. We used to use RFC 8628 device
+/// authorization, but Spotify has tightened that grant type's eligibility
+/// (it now refuses with `unauthorized_client` for non-hardware-device apps).
+/// PKCE is the standard recommended flow for native desktop apps and
+/// avoids the grant-type gatekeeping entirely.
 ///
-/// The full original service exposes a large Spotify Web/Internal API surface that
-/// gets bridged through to the Car Thing over RFCOMM. Here we only implement the
-/// pieces the macOS UI needs: device auth, polling, refresh, sign-out, and a tiny
-/// "Get Current User's Profile" call to surface the display name.
+/// Flow:
+///   1. Generate `code_verifier` (random 64-byte base64url string) and
+///      `code_challenge = SHA256(code_verifier)` (base64url).
+///   2. Start a one-shot localhost HTTP listener on 127.0.0.1:8888.
+///   3. Open the user's browser at `accounts.spotify.com/authorize?...`.
+///   4. User logs in → Spotify redirects to `http://127.0.0.1:8888/callback?code=...`.
+///   5. Listener catches the code, we exchange it + code_verifier at
+///      `/api/token` for an access_token + refresh_token.
+///
+/// The redirect URI here must match exactly what's registered in the
+/// Spotify dashboard for this client_id (see Configuration.swift). Default:
+/// `http://127.0.0.1:8888/callback`.
 @MainActor
 final class SpotifyService: ObservableObject {
     private let log = Log.make(for: "SpotifyService")
@@ -20,10 +32,13 @@ final class SpotifyService: ObservableObject {
 
     @Published private(set) var authState: SpotifyAuthState = .idle
 
-    private var pollingTask: Task<Void, Never>?
+    private var pkceTask: Task<Void, Never>?
+    private var callbackServer: LocalhostCallbackServer?
     private var refreshTimer: Timer?
 
     private static let refreshInterval: TimeInterval = 30 * 60
+    private static let redirectURI = "http://127.0.0.1:8888/callback"
+    private static let callbackPort: UInt16 = 8888
 
     // MARK: - Lifecycle
 
@@ -47,164 +62,209 @@ final class SpotifyService: ObservableObject {
         startRefreshTimer()
     }
 
-    // MARK: - Authorize (RFC 8628 device flow)
+    // MARK: - Authorize (Authorization Code + PKCE)
 
+    /// Kicks off the PKCE flow. Method name retained for compatibility with
+    /// the UI buttons that previously called the device-auth version.
     func startDeviceAuthorization() async throws {
         authState = .loading
-        log.info("Starting Spotify device-auth flow")
+        log.info("Starting Spotify PKCE auth flow")
 
-        let comp = URLComponents(string: "https://accounts.spotify.com/oauth2/device/authorize")!
-        let formBody = api.encodeForm([
-            "client_id": AppConfig.spotifyClientID,
-            "scope": AppConfig.spotifyScopes.joined(separator: " ")
-        ])
+        // 1. Generate PKCE values.
+        let codeVerifier = Self.generateCodeVerifier()
+        let codeChallenge = Self.pkceChallenge(from: codeVerifier)
+        let stateToken = Self.randomURLSafe(length: 32)
 
-        let data: Data
-        let http: HTTPURLResponse
+        // 2. Start the localhost listener BEFORE opening the browser so we
+        // don't race the redirect.
+        let server = LocalhostCallbackServer(port: Self.callbackPort)
         do {
-            (data, http) = try await api.request(
-                comp.url!,
-                method: "POST",
-                body: formBody,
-                contentType: "application/x-www-form-urlencoded"
-            )
+            try server.start()
         } catch {
             authState = .idle
-            log.warning("Spotify device-auth request failed: \(error.localizedDescription, privacy: .public)")
+            log.error("Failed to bind localhost callback: \(error.localizedDescription, privacy: .public)")
             throw error
         }
+        self.callbackServer = server
 
-        guard (200..<300).contains(http.statusCode) else {
+        // 3. Construct the Spotify authorize URL and open it.
+        var comp = URLComponents(string: "https://accounts.spotify.com/authorize")!
+        comp.queryItems = [
+            URLQueryItem(name: "client_id", value: AppConfig.spotifyClientID),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "redirect_uri", value: Self.redirectURI),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "code_challenge", value: codeChallenge),
+            URLQueryItem(name: "state", value: stateToken),
+            URLQueryItem(name: "scope", value: AppConfig.spotifyScopes.joined(separator: " "))
+        ]
+        guard let authURL = comp.url else {
+            await teardownCallbackServer()
             authState = .idle
-            let body = String(data: data, encoding: .utf8) ?? ""
-            log.warning("Spotify device-auth HTTP \(http.statusCode, privacy: .public): \(body, privacy: .public)")
-            throw HTTPError.status(http.statusCode, body)
+            throw HTTPError.status(0, "Failed to build authorize URL")
         }
-        let resp = try JSONDecoder().decode(SpotifyDeviceAuthResponse.self, from: data)
-        let interval = resp.interval ?? 5
+        // Surface in the UI via the existing `.polling` case so SpotifyLinkBanner
+        // can show "Authorize on Spotify" with the URL. userCode isn't used by
+        // PKCE so we leave it as a placeholder dash.
         authState = .polling(
-            deviceCode: resp.device_code,
-            userCode: resp.user_code,
-            verificationURI: resp.verification_uri,
-            interval: interval
+            deviceCode: "",
+            userCode: "—",
+            verificationURI: authURL.absoluteString,
+            interval: 0
         )
 
-        // Open the verification URL in the user's default browser.
-        let urlString = resp.verification_uri + "?code=" + resp.user_code
-        if let url = URL(string: urlString) {
-            #if canImport(AppKit)
-            NSWorkspace.shared.open(url)
-            #endif
+        #if canImport(AppKit)
+        NSWorkspace.shared.open(authURL)
+        #endif
+
+        // 4. Wait for the redirect with `code=...`.
+        let params: [String: String]
+        do {
+            params = try await server.waitForCallback()
+        } catch {
+            await teardownCallbackServer()
+            authState = .idle
+            log.error("OAuth callback failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+        await teardownCallbackServer()
+
+        if let returnedState = params["state"], returnedState != stateToken {
+            authState = .idle
+            throw HTTPError.status(400, "OAuth state mismatch")
+        }
+        if let err = params["error"] {
+            authState = .idle
+            throw HTTPError.status(400, "Spotify returned error: \(err) — \(params["error_description"] ?? "")")
+        }
+        guard let code = params["code"] else {
+            authState = .idle
+            throw HTTPError.status(400, "OAuth callback missing 'code'")
         }
 
-        startPolling(deviceCode: resp.device_code, interval: interval)
+        // 5. Exchange the code + code_verifier for tokens.
+        try await exchangeAuthorizationCode(code: code, verifier: codeVerifier)
     }
 
     func cancelAuthorization() {
-        pollingTask?.cancel()
-        pollingTask = nil
+        pkceTask?.cancel()
+        pkceTask = nil
+        Task { @MainActor [weak self] in await self?.teardownCallbackServer() }
         authState = .idle
     }
 
     func disconnect() async {
-        pollingTask?.cancel()
-        pollingTask = nil
+        pkceTask?.cancel()
+        pkceTask = nil
+        await teardownCallbackServer()
         stopRefreshTimer()
         store.clearSpotifyCredentials()
         authState = .idle
     }
 
-    // MARK: - Polling
-
-    private func startPolling(deviceCode: String, interval: Int) {
-        pollingTask?.cancel()
-        pollingTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(interval) * 1_000_000_000)
-                if Task.isCancelled { return }
-                let outcome = await self.pollOnce(deviceCode: deviceCode)
-                switch outcome {
-                case .pending:
-                    continue
-                case .expired:
-                    self.authState = .idle
-                    return
-                case .linked:
-                    return
-                case .failed(let err):
-                    self.log.error("Spotify polling error: \(err.localizedDescription, privacy: .public)")
-                    self.authState = .idle
-                    return
-                }
-            }
-        }
+    private func teardownCallbackServer() async {
+        callbackServer?.stop()
+        callbackServer = nil
     }
 
-    private enum PollOutcome { case pending, expired, linked, failed(Error) }
+    // MARK: - Token exchange (PKCE)
 
-    private func pollOnce(deviceCode: String) async -> PollOutcome {
+    private func exchangeAuthorizationCode(code: String, verifier: String) async throws {
+        let body = api.encodeForm([
+            "client_id": AppConfig.spotifyClientID,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": Self.redirectURI,
+            "code_verifier": verifier
+        ])
+        let (data, http): (Data, HTTPURLResponse)
         do {
-            let body = api.encodeForm([
-                "client_id": AppConfig.spotifyClientID,
-                "device_code": deviceCode,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
-            ])
-            let (data, _) = try await api.request(
+            (data, http) = try await api.request(
                 URL(string: "https://accounts.spotify.com/api/token")!,
                 method: "POST",
                 body: body,
                 contentType: "application/x-www-form-urlencoded"
             )
-            let resp = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+        } catch {
+            authState = .idle
+            throw error
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            authState = .idle
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            log.warning("Token exchange HTTP \(http.statusCode, privacy: .public): \(bodyText, privacy: .public)")
+            throw HTTPError.status(http.statusCode, bodyText)
+        }
+        let resp = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+        guard let access = resp.access_token,
+              let refresh = resp.refresh_token,
+              let expiresIn = resp.expires_in else {
+            authState = .idle
+            throw HTTPError.status(0, "Malformed token response")
+        }
 
-            if let err = resp.error {
-                switch err {
-                case "authorization_pending", "slow_down": return .pending
-                case "expired_token": return .expired
-                default: return .failed(HTTPError.status(400, resp.error_description ?? err))
-                }
-            }
+        var creds = SpotifyCredentials(
+            accessToken: access,
+            refreshToken: refresh,
+            scope: resp.scope,
+            tokenType: resp.token_type ?? "Bearer",
+            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
+            displayName: nil
+        )
+        store.saveSpotifyCredentials(creds)
 
-            guard let access = resp.access_token,
-                  let refresh = resp.refresh_token,
-                  let expiresIn = resp.expires_in else {
-                return .failed(HTTPError.status(0, "Malformed token response"))
-            }
-
-            let creds = SpotifyCredentials(
-                accessToken: access,
-                refreshToken: refresh,
-                scope: resp.scope,
-                tokenType: resp.token_type ?? "Bearer",
-                expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
-                displayName: nil
+        // Fetch display name for the linked-state banner. Non-fatal if it fails.
+        var displayName: String? = nil
+        do {
+            displayName = try await fetchDisplayName(accessToken: access)
+            creds = SpotifyCredentials(
+                accessToken: creds.accessToken,
+                refreshToken: creds.refreshToken,
+                scope: creds.scope,
+                tokenType: creds.tokenType,
+                expiresAt: creds.expiresAt,
+                displayName: displayName
             )
             store.saveSpotifyCredentials(creds)
-
-            // Best-effort fetch the display name for the linked-state banner.
-            var displayName: String? = nil
-            do {
-                displayName = try await fetchDisplayName(accessToken: access)
-                let withName = SpotifyCredentials(
-                    accessToken: creds.accessToken,
-                    refreshToken: creds.refreshToken,
-                    scope: creds.scope,
-                    tokenType: creds.tokenType,
-                    expiresAt: creds.expiresAt,
-                    displayName: displayName
-                )
-                store.saveSpotifyCredentials(withName)
-            } catch {
-                log.warning("Profile fetch failed: \(error.localizedDescription, privacy: .public)")
-            }
-
-            authState = .linked(displayName: displayName)
-            startRefreshTimer()
-            return .linked
         } catch {
-            return .failed(error)
+            log.warning("Profile fetch failed: \(error.localizedDescription, privacy: .public)")
         }
+
+        authState = .linked(displayName: displayName)
+        startRefreshTimer()
+    }
+
+    // MARK: - PKCE helpers
+
+    /// Generate a high-entropy code_verifier (RFC 7636 section 4.1):
+    /// 43-128 chars from the unreserved URL set. We use 64 bytes of random
+    /// data, base64url-encoded without padding (yields ~86 chars).
+    private static func generateCodeVerifier() -> String {
+        var bytes = [UInt8](repeating: 0, count: 64)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return base64URL(Data(bytes))
+    }
+
+    /// SHA-256 hash of the verifier, base64url-encoded without padding.
+    private static func pkceChallenge(from verifier: String) -> String {
+        let hash = SHA256.hash(data: Data(verifier.utf8))
+        return base64URL(Data(hash))
+    }
+
+    /// Random URL-safe string used as the OAuth `state` parameter to detect
+    /// callback tampering / cross-site replay.
+    private static func randomURLSafe(length: Int) -> String {
+        var bytes = [UInt8](repeating: 0, count: length)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return base64URL(Data(bytes))
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        var s = data.base64EncodedString()
+        s = s.replacingOccurrences(of: "+", with: "-")
+        s = s.replacingOccurrences(of: "/", with: "_")
+        s = s.replacingOccurrences(of: "=", with: "")
+        return s
     }
 
     // MARK: - Refresh

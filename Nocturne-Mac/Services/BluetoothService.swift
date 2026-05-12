@@ -26,6 +26,28 @@ final class BluetoothService: ObservableObject {
     @Published private(set) var pendingPin: BTPairingPin? = nil
     @Published var lastError: String? = nil
 
+    /// Per-address connectability state. When `nocturned` refuses our SPP
+    /// connection on every advertised channel, we transition into `.rejecting`
+    /// and suppress auto-retries for `peerCooldown` seconds — otherwise we'd
+    /// hammer the device every UI tick and fill the log with `-536870186` /
+    /// "No channel" warnings. The user can still force a retry manually.
+    @Published private(set) var peerConnectability: [String: PeerConnectability] = [:]
+    enum PeerConnectability: Equatable {
+        case unknown
+        case connecting
+        case connected
+        /// All candidate channels rejected. Most likely the Car Thing's
+        /// `nocturned` is gating us — typically only opens after the Nocturne
+        /// Companion phone app pokes it, or after a manual connect from the
+        /// Car Thing's own touchscreen UI.
+        case rejecting(since: Date)
+    }
+    private let peerCooldown: TimeInterval = 60
+    /// Most recent time we surrendered after exhausting every candidate channel
+    /// for a given address. Auto-retries (launch reconnect, etc.) ignore the
+    /// device while this is fresh.
+    private var lastRejectionAt: [String: Date] = [:]
+
     /// Optional RPC manager. When set, every RFCOMM channel that opens is
     /// attached to it and inbound bytes are forwarded for msgpack decoding.
     weak var rpcManager: RPCManager?
@@ -207,7 +229,13 @@ final class BluetoothService: ObservableObject {
 
     // MARK: - RFCOMM connection
 
-    func connect(address: String, channel: BluetoothRFCOMMChannelID? = nil) {
+    /// Initiate (or queue) an RFCOMM connect.
+    /// - Parameters:
+    ///   - address: Target Bluetooth address.
+    ///   - channel: Optional channel ID override; otherwise SDP-discovered.
+    ///   - userInitiated: `true` when triggered by an explicit button press —
+    ///     bypasses the gate-rejection cooldown so the user can force a retry.
+    func connect(address: String, channel: BluetoothRFCOMMChannelID? = nil, userInitiated: Bool = false) {
         // Guard against parallel connect attempts to the same address — those
         // race on `outboundChannelContinuation` and leak. If one's already in
         // flight, drop the new call instead of stomping the slot.
@@ -215,11 +243,23 @@ final class BluetoothService: ObservableObject {
             log.info("connect(\(address, privacy: .public)) skipped — already in flight")
             return
         }
+        // Cooldown: if every candidate channel was just rejected, ignore
+        // background reconnect attempts until the window passes. Manual user
+        // taps bypass this (they reset the cooldown).
+        if !userInitiated, let at = lastRejectionAt[address], Date().timeIntervalSince(at) < peerCooldown {
+            let remaining = Int(peerCooldown - Date().timeIntervalSince(at))
+            log.info("connect(\(address, privacy: .public)) suppressed — peer rejected \(remaining, privacy: .public)s ago")
+            return
+        }
+        if userInitiated {
+            lastRejectionAt[address] = nil
+        }
         guard let device = IOBluetoothDevice(addressString: address) else {
             lastError = "Unknown device \(address)"
             return
         }
         lastError = nil
+        peerConnectability[address] = .connecting
         let chDesc = channel.map(String.init) ?? "auto"
         log.info("connect(\(address, privacy: .public), channel: \(chDesc, privacy: .public))")
 
@@ -227,7 +267,7 @@ final class BluetoothService: ObservableObject {
         Task.detached { [weak self] in
             guard let self else { return }
             await self.openRFCOMM(device: device, requestedChannel: channel)
-            await MainActor.run { self.inFlightConnects.remove(address) }
+            await MainActor.run { _ = self.inFlightConnects.remove(address) }
         }
     }
 
@@ -267,14 +307,22 @@ final class BluetoothService: ObservableObject {
 
         // Discover the SPP channel via SDP. macOS's performSDPQuery is async — we
         // kick it off and poll briefly for the service record to populate.
+        //
+        // IMPORTANT: every IOBluetooth method on `device` must be invoked from
+        // the main thread. We're inside a `Task.detached` (background queue)
+        // here, and calling `getServiceRecord(for:)` off-main has been
+        // observed to hard-crash (EXC_BAD_ACCESS inside the framework). Hop
+        // to MainActor for the SDP calls.
         let sppUUID = IOBluetoothSDPUUID.uuid16(UInt16(kBluetoothSDPUUID16ServiceClassSerialPort.rawValue))
-        let sdpStatus = device.performSDPQuery(nil)
+        let sdpStatus: IOReturn = await MainActor.run { device.performSDPQuery(nil) }
         log.info("performSDPQuery(\(addr, privacy: .public)) -> \(sdpStatus, privacy: .public)")
-        var record: IOBluetoothSDPServiceRecord? = device.getServiceRecord(for: sppUUID)
+        var record: IOBluetoothSDPServiceRecord? = await MainActor.run {
+            device.getServiceRecord(for: sppUUID)
+        }
         for _ in 0..<15 {
             if record != nil { break }
             try? await Task.sleep(nanoseconds: 200_000_000)
-            record = device.getServiceRecord(for: sppUUID)
+            record = await MainActor.run { device.getServiceRecord(for: sppUUID) }
         }
 
         // Build ordered candidate channels: hint, then SDP-discovered, then common fallbacks.
@@ -345,8 +393,19 @@ final class BluetoothService: ObservableObject {
             }
         }
 
+        // Every candidate rejected. Mark the peer as rejecting and start the
+        // cooldown; auto-retries (launch reconnect, etc.) will skip this
+        // address until the window expires or the user hits Retry manually.
         await MainActor.run {
-            self.lastError = "RFCOMM open failed on \(addr) — tried channels \(candidates). Check that the Car Thing is running Nocturne firmware and not connected elsewhere."
+            self.peerConnectability[addr] = .rejecting(since: Date())
+            self.lastRejectionAt[addr] = Date()
+            // If an inbound channel from the Car Thing is already open, the
+            // outbound failure is non-fatal — RPC will still work over the
+            // inbound socket. Don't scare the user in that case.
+            let hasInbound = self.activeChannels.keys.contains(where: { $0.hasPrefix("\(addr)#") })
+            if !hasInbound {
+                self.lastError = "Car Thing refused every channel (tried \(candidates)). Open Nocturne on the Car Thing's screen and pick this Mac, or start the Nocturne Companion phone app — `nocturned` only opens its RFCOMM gate when one of those wakes it."
+            }
         }
     }
 
@@ -399,9 +458,10 @@ final class BluetoothService: ObservableObject {
             }
             // Auto-connect RFCOMM shortly after pairing. Don't hardcode a channel —
             // openRFCOMM tries SDP-discovered first, then falls back to 2/1/3.
+            // Bypass the rejection cooldown since pairing is a user-initiated act.
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
-                connect(address: address)
+                connect(address: address, userInitiated: true)
             }
         } else {
             log.warning("Pair failed for \(address, privacy: .public)")
@@ -451,6 +511,8 @@ final class BluetoothService: ObservableObject {
         if let idx = devices.firstIndex(where: { $0.address == address }) {
             devices[idx].connected = true
         }
+        peerConnectability[address] = .connected
+        lastRejectionAt[address] = nil
         lastError = nil
 
         // Hand the channel to the RPC manager — but ONLY for outbound channels

@@ -43,7 +43,7 @@ struct SpotifyLinkBanner: View {
                         .buttonStyle(PrimaryButtonStyle(prominent: false))
                     }
                 }
-            case .polling(_, let userCode, let verificationURI, _):
+            case .polling(_, _, let verificationURI, _):
                 Card {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: "hourglass")
@@ -56,13 +56,24 @@ struct SpotifyLinkBanner: View {
                             Text("Authorize on Spotify")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(Theme.fg)
-                            Text("Enter code \(userCode) at \(verificationURI)")
-                                .font(.system(size: 11, design: .monospaced))
+                            Text("Sign in on the Spotify page that just opened in your browser.")
+                                .font(.system(size: 11))
                                 .foregroundStyle(Theme.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: 0)
-                        Button("Cancel") { spotify.cancelAuthorization() }
+                        VStack(spacing: 4) {
+                            Button("Reopen page") {
+                                #if canImport(AppKit)
+                                if let url = URL(string: verificationURI) {
+                                    NSWorkspace.shared.open(url)
+                                }
+                                #endif
+                            }
                             .buttonStyle(PrimaryButtonStyle(prominent: false))
+                            Button("Cancel") { spotify.cancelAuthorization() }
+                                .buttonStyle(PrimaryButtonStyle(prominent: false))
+                        }
                     }
                 }
             case .loading:

@@ -79,25 +79,7 @@ struct DashboardView: View {
                 // pairing for the first time.
                 VStack(spacing: 10) {
                     ForEach(pendingDevices) { device in
-                        Card {
-                            HStack(spacing: 14) {
-                                Image(systemName: "hourglass")
-                                    .frame(width: 40, height: 40)
-                                    .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                                    .foregroundStyle(Theme.accent)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(device.displayName)
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundStyle(Theme.fg)
-                                    Text("Paired — waiting for the Car Thing to open an RFCOMM channel")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Theme.secondary)
-                                }
-                                Spacer()
-                                Button("Retry") { bluetooth.connect(address: device.address) }
-                                    .buttonStyle(PrimaryButtonStyle(prominent: false))
-                            }
-                        }
+                        pendingDeviceCard(for: device)
                     }
                     if let err = bluetooth.lastError {
                         Text(err)
@@ -138,6 +120,77 @@ struct DashboardView: View {
             DeviceInfoSheet(device: device) { selectedDevice = nil }
         }
         .padding(.bottom, 24)
+    }
+
+    /// Renders the per-device row in the "paired but not connected" state.
+    /// Branches on `BluetoothService.peerConnectability` so a Car Thing whose
+    /// `nocturned` is refusing every RFCOMM channel gets an actionable message
+    /// (open Nocturne on the device or run the phone app) instead of an
+    /// indefinite "waiting…" spinner.
+    @ViewBuilder
+    private func pendingDeviceCard(for device: BTDeviceInfo) -> some View {
+        let state = bluetooth.peerConnectability[device.address] ?? .unknown
+        Card {
+            HStack(spacing: 14) {
+                Image(systemName: state.icon)
+                    .frame(width: 40, height: 40)
+                    .background(state.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(state.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(device.displayName)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.fg)
+                    Text(state.headline)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button(state.actionLabel) {
+                    bluetooth.connect(address: device.address, userInitiated: true)
+                }
+                .buttonStyle(PrimaryButtonStyle(prominent: state.actionProminent))
+            }
+        }
+    }
+}
+
+private extension BluetoothService.PeerConnectability {
+    var icon: String {
+        switch self {
+        case .rejecting:  return "exclamationmark.triangle.fill"
+        case .connecting: return "antenna.radiowaves.left.and.right"
+        case .connected:  return "checkmark.circle.fill"
+        case .unknown:    return "hourglass"
+        }
+    }
+    var tint: SwiftUI.Color {
+        switch self {
+        case .rejecting:  return Theme.destructive
+        case .connecting: return Theme.accent
+        case .connected:  return Theme.success
+        case .unknown:    return Theme.accent
+        }
+    }
+    var headline: String {
+        switch self {
+        case .rejecting:
+            return "Car Thing is refusing the connection. Open Nocturne on its touchscreen and pick this Mac, or start the Nocturne Companion phone app — nocturned only opens its RFCOMM gate when one of those wakes it."
+        case .connecting:
+            return "Opening RFCOMM channel…"
+        case .connected:
+            return "Connected"
+        case .unknown:
+            return "Paired — waiting for the Car Thing to open an RFCOMM channel"
+        }
+    }
+    var actionLabel: String {
+        if case .rejecting = self { return "Try again" }
+        return "Retry"
+    }
+    var actionProminent: Bool {
+        if case .rejecting = self { return true }
+        return false
     }
 }
 

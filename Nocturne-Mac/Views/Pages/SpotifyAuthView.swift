@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct SpotifyAuthView: View {
     @EnvironmentObject var spotify: SpotifyService
@@ -76,23 +79,31 @@ struct SpotifyAuthView: View {
                 Text("Waiting for Spotify Authorization")
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(Theme.fg)
-                Text("A browser tab should have opened automatically.")
+                Text("A browser tab should have opened automatically. Sign in to Spotify there to finish linking.")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.secondary)
-                Text("Code: \(userCode)")
-                    .font(.system(size: 20, weight: .semibold, design: .monospaced))
-                    .tracking(4)
-                    .foregroundStyle(Theme.fg)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 6) {
                     Circle().frame(width: 6, height: 6).foregroundStyle(Theme.accent).opacity(0.6)
                     Text("Waiting for authorization...")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.muted)
                 }
-                Button("Cancel") {
-                    spotify.cancelAuthorization()
+                HStack(spacing: 8) {
+                    Button("Reopen Spotify page") {
+                        #if canImport(AppKit)
+                        if let url = URL(string: verificationURI) {
+                            NSWorkspace.shared.open(url)
+                        }
+                        #endif
+                    }
+                    .buttonStyle(PrimaryButtonStyle(prominent: false))
+                    Button("Cancel") {
+                        spotify.cancelAuthorization()
+                    }
+                    .buttonStyle(PrimaryButtonStyle(prominent: false))
                 }
-                .buttonStyle(PrimaryButtonStyle(prominent: false))
             }
             .frame(maxWidth: .infinity)
         }

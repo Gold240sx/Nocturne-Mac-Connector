@@ -144,6 +144,20 @@ final class NowPlayingService: ObservableObject {
         if media.isAvailable {
             media.start()  // register distributed notifications + initial fetch
         }
+        // Proactively trigger the macOS Automation TCC registration for
+        // Spotify shortly after launch. The Automation pane in System
+        // Settings only lists apps that have *declared* an intent to
+        // automate another app via `AEDeterminePermissionToAutomateTarget`
+        // (there is no "+" button to add manually) — without this, the
+        // user can't find the toggle to grant the permission that's
+        // required for setVolume / seek / shuffle / repeat to work.
+        Task { @MainActor [weak self] in
+            // Wait a beat so the app window is on-screen before the system
+            // shows the consent dialog — surfacing it before any UI is up
+            // looks broken to the user.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            _ = self?.local.requestAutomationPermission()
+        }
         #endif
         startPolling()
     }

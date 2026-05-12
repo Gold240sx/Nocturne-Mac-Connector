@@ -5,7 +5,8 @@ enum AppConfig {
     static let supabaseURL = URL(string: "https://qrrtjdmdclkpssjzhzhw.supabase.co")!
     static let supabaseAnonKey = "sb_publishable_sUnSM7qjeWn6rcI9x_fmWg_VJddosT-"
 
-    static let spotifyClientID = "65b708073fc0480ea92a077233ca87bd"
+    static let spotifyClientID = "06b976f397ee4ce8a78dc511976a3baf"
+//    static let spotifyClientID = "65b708073fc0480ea92a077233ca87bd"
 
     static let nocturneSiteURL = URL(string: "https://main-nocturne-site.vantalabs.workers.dev/")!
     static let otaServerURL = URL(string: "https://ota.usenocturne.com")!
@@ -13,12 +14,18 @@ enum AppConfig {
     /// RFCOMM Serial Port Profile UUID. Used to find the Car Thing's serial channel.
     static let rfcommUUID = "00001101-0000-1000-8000-00805f9b34fb"
 
+    /// Spotify OAuth scopes — only currently-documented values. The previous
+    /// list had `playlist-modify`, `playlist-read`, `user-modify`,
+    /// `user-modify-private`, `user-personalized`, `user-read-birthdate`, and
+    /// `user-read-play-history` — none of which are real Spotify scopes (some
+    /// were deprecated, some never existed). When Spotify gets any unknown
+    /// scope in the device-auth request it returns
+    /// `{"error":"invalid_scope","error_description":"Invalid scope requested"}`
+    /// for the entire request — so a single bogus entry kills the whole flow.
     static let spotifyScopes: [String] = [
         "app-remote-control",
-        "playlist-modify",
         "playlist-modify-private",
         "playlist-modify-public",
-        "playlist-read",
         "playlist-read-collaborative",
         "playlist-read-private",
         "streaming",
@@ -27,14 +34,9 @@ enum AppConfig {
         "user-follow-read",
         "user-library-modify",
         "user-library-read",
-        "user-modify",
         "user-modify-playback-state",
-        "user-modify-private",
-        "user-personalized",
-        "user-read-birthdate",
         "user-read-currently-playing",
         "user-read-email",
-        "user-read-play-history",
         "user-read-playback-position",
         "user-read-playback-state",
         "user-read-private",
