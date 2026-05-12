@@ -5,8 +5,29 @@ enum AppConfig {
     static let supabaseURL = URL(string: "https://qrrtjdmdclkpssjzhzhw.supabase.co")!
     static let supabaseAnonKey = "sb_publishable_sUnSM7qjeWn6rcI9x_fmWg_VJddosT-"
 
+    // ⚠️ BRING YOUR OWN SPOTIFY CLIENT ID.
+    //
+    // If you forked this repo to build it for yourself, you MUST register
+    // your own app at https://developer.spotify.com/dashboard and paste
+    // its Client ID here. Don't ship someone else's client_id.
+    //
+    // Three reasons:
+    //   1. Spotify's quotas are per-app, not per-user. A shared client_id
+    //      burns out fast under multiple developers' traffic and trips
+    //      the rate limiter for everyone tied to it. (Symptom: 429
+    //      "API rate limit exceeded" on the very first call after a
+    //      fresh OAuth — we hit this in development, see git history.)
+    //   2. New Spotify apps are in Development Mode — limited to 25
+    //      users on a whitelist that only the app owner edits. Tokens
+    //      issued to non-whitelisted users 403 on most endpoints.
+    //   3. The client_id ships in the binary. You don't want your build
+    //      depending on someone else's revocation decisions.
+    //
+    // Setup walkthrough: docs/setup-spotify-client.md
+    //
+    // Don't store a client_secret here — this app uses Authorization Code
+    // + PKCE which has no secret.
     static let spotifyClientID = "06b976f397ee4ce8a78dc511976a3baf"
-//    static let spotifyClientID = "65b708073fc0480ea92a077233ca87bd"
 
     static let nocturneSiteURL = URL(string: "https://main-nocturne-site.vantalabs.workers.dev/")!
     static let otaServerURL = URL(string: "https://ota.usenocturne.com")!
