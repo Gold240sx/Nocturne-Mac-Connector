@@ -423,6 +423,32 @@ final class RPCManager: ObservableObject {
             guard !ids.isEmpty else { return (.array([]), nil) }
             let escaped = ids.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ids
             return await proxyWebGet(path: "me/albums/contains?ids=\(escaped)")
+
+        // --- Save / unsave (the heart button) ---
+        // Firmware sends these when the user taps the heart icon. Returning
+        // bool(true) lets the firmware's optimistic UI stick. Cache for the
+        // matching `contains` endpoint is cleared so the next read reflects
+        // the new state instead of returning stale data.
+        case "spotify.me.tracks.save", "spotify.me.tracks.remove":
+            let ok = await libraryMutation(
+                resource: "tracks", params: params, save: method.hasSuffix("save"))
+            return (.bool(ok), nil)
+        case "spotify.me.albums.save", "spotify.me.albums.remove":
+            let ok = await libraryMutation(
+                resource: "albums", params: params, save: method.hasSuffix("save"))
+            return (.bool(ok), nil)
+        case "spotify.me.shows.save", "spotify.me.shows.remove":
+            let ok = await libraryMutation(
+                resource: "shows", params: params, save: method.hasSuffix("save"))
+            return (.bool(ok), nil)
+        case "spotify.me.episodes.save", "spotify.me.episodes.remove":
+            let ok = await libraryMutation(
+                resource: "episodes", params: params, save: method.hasSuffix("save"))
+            return (.bool(ok), nil)
+        case "spotify.me.artists.follow", "spotify.me.artists.unfollow":
+            let ok = await followMutation(
+                params: params, follow: method.hasSuffix("follow"))
+            return (.bool(ok), nil)
         case "spotify.me.tracks", "spotify.me.savedTracks":
             let limit = params.mapValue("limit")?.intValue ?? 20
             let offset = params.mapValue("offset")?.intValue ?? 0
@@ -1227,6 +1253,102 @@ final class RPCManager: ObservableObject {
     // entirely and works for play/pause (which the firmware otherwise tries
     // to send via Spotify Connect WebSocket, requiring full Web auth on the
     // Car Thing side too).
+
+    /// Mutate the user's library (save/remove). `resource` is "tracks",
+    /// "albums", "shows", or "episodes". Returns true on a 2xx response.
+    ///
+    /// After a successful mutation, invalidates any cached `contains` reads
+    /// for the affected IDs so the firmware's next "is this saved?" check
+    /// reflects the new state (otherwise the heart icon flickers back to
+    /// its old state until the 30s cache TTL expires).
+    @discardableResult
+    private func libraryMutation(resource: String, params: MessagePackValue, save: Bool) async -> Bool {
+        let ids = (params.mapValue("ids")?.arrayValue ?? [])
+            .compactMap { $0.stringValue }
+        guard !ids.isEmpty else { return false }
+        let idsParam = ids.joined(separator: ",")
+        let escaped = idsParam.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? idsParam
+        let url = URL(string: "https://api.spotify.com/v1/me/\(resource)?ids=\(escaped)")!
+        let ok = await spotifyWebMutationRequest(
+            url: url, method: save ? "PUT" : "DELETE", body: nil)
+        if ok {
+            // Drop stale `<resource>/contains` entries so the next read
+            // doesn't return the pre-mutation booleans from cache.
+            let prefix = "me/\(resource)/contains"
+            for key in proxyGetCache.keys where key.hasPrefix(prefix) {
+                proxyGetCache.removeValue(forKey: key)
+            }
+        }
+        return ok
+    }
+
+    /// Follow / unfollow an artist (the artist row's heart equivalent).
+    /// Mirrors `libraryMutation` but uses /v1/me/following with the
+    /// `type=artist` discriminator.
+    @discardableResult
+    private func followMutation(params: MessagePackValue, follow: Bool) async -> Bool {
+        let ids = (params.mapValue("ids")?.arrayValue ?? [])
+            .compactMap { $0.stringValue }
+        guard !ids.isEmpty else { return false }
+        let idsParam = ids.joined(separator: ",")
+        let escaped = idsParam.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? idsParam
+        let url = URL(string: "https://api.spotify.com/v1/me/following?type=artist&ids=\(escaped)")!
+        let ok = await spotifyWebMutationRequest(
+            url: url, method: follow ? "PUT" : "DELETE", body: nil)
+        if ok {
+            for key in proxyGetCache.keys where key.hasPrefix("me/following") {
+                proxyGetCache.removeValue(forKey: key)
+            }
+        }
+        return ok
+    }
+
+    /// Generic Spotify Web API mutation. Honors the global cooldown,
+    /// refreshes the access token if it's near expiry, and surfaces the
+    /// outcome as a bool. 200/202/204 all count as success — Spotify
+    /// returns 200 for some PUTs, 204 for others, and 202 for some
+    /// follow-graph operations. Errors are logged but don't propagate;
+    /// the optimistic UI on the firmware keeps the heart filled, and the
+    /// next contains-read will tell the truth.
+    @discardableResult
+    private func spotifyWebMutationRequest(url: URL, method: String, body: Data?) async -> Bool {
+        guard var creds = SessionStore.shared.loadSpotifyCredentials() else {
+            log.info("Spotify Web token absent; skipping \(method, privacy: .public) \(url.absoluteString, privacy: .public)")
+            return false
+        }
+        if Date() < webAPICooldownUntil {
+            log.info("spotify-web \(method, privacy: .public) \(url.path, privacy: .public) skipped (in cooldown)")
+            return false
+        }
+        if creds.expiresAt < Date().addingTimeInterval(60) {
+            await spotify.bootstrap()
+            if let refreshed = SessionStore.shared.loadSpotifyCredentials() {
+                creds = refreshed
+            }
+        }
+        do {
+            let (data, http) = try await api.request(
+                url, method: method, headers: ["Authorization": "Bearer \(creds.accessToken)"], body: body)
+            log.info("spotify-web \(method, privacy: .public) \(url.path, privacy: .public) -> \(http.statusCode, privacy: .public)")
+            if http.statusCode == 429 {
+                let retryAfter = (http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init)) ?? 30
+                webAPICooldownUntil = Date().addingTimeInterval(TimeInterval(retryAfter))
+                let bodyText = String(data: data, encoding: .utf8) ?? "<binary>"
+                log.warning("spotify-web 429 \(method, privacy: .public) \(url.path, privacy: .public) body=\(bodyText, privacy: .public)")
+                return false
+            }
+            if http.statusCode == 401 {
+                let bodyText = String(data: data, encoding: .utf8) ?? "<binary>"
+                log.warning("spotify-web 401 \(method, privacy: .public) \(url.path, privacy: .public) body=\(bodyText, privacy: .public)")
+                await spotify.bootstrap()
+                return false
+            }
+            return (200..<300).contains(http.statusCode)
+        } catch {
+            log.warning("spotify-web \(method, privacy: .public) \(url.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
 
     /// Returns true if we successfully issued the Web API request (regardless
     /// of HTTP success). Returns false only if there's no linked Spotify
