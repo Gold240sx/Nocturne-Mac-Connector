@@ -702,8 +702,35 @@ final class RPCManager: ObservableObject {
     ///   throttled — much better than falling back to the synthesized payload
     ///   that's missing context_uri/restrictions/etc.
     private var cachedPlayerState: (payload: MessagePackValue, fetchedAt: Date)? = nil
+    /// Raw `/v1/me/player` REST JSON (as MessagePackValue) cached alongside
+    /// the wrapped cluster. Lets the progressive-image-quality loop rebuild
+    /// the cluster with a different image URL without hitting Spotify again.
+    private var cachedRestPlayer: MessagePackValue? = nil
     private var cacheNeedsRefresh: Bool = false
     private let playerStateCacheTTL: TimeInterval = 10.0
+
+    // MARK: - Progressive image quality
+    //
+    // The Car Thing's WebView reliably decodes 64x64 album art but its
+    // color-extraction step (synchronous canvas pass) hangs on larger base64
+    // data URLs. We work around this by progressively serving images:
+    //   t=0     small  (64x64, ~5KB)  — guaranteed to render
+    //   t=2s    medium (300x300, ~30KB) — try to upgrade; if it hangs, the
+    //                                    small image stays painted on-screen
+    //   t=4s    large  (640x640, ~80KB) — last upgrade attempt
+    // Cancelled and reset to 0 whenever the track URI changes.
+    private var currentTrackURI: String? = nil
+    /// Locked at 0 (small 64x64). This is the only level the Car Thing's
+    /// embedded WebView renders reliably — both 300x300 and 640x640 silently
+    /// hang the firmware's color-extraction step (img.onload never fires in
+    /// the WebView's canvas pass), so the listener never resolves and the
+    /// art stays as the gray-placeholder fallback. 64x64 up-scales to the
+    /// 280x280 NowPlaying slot — softer than ideal but actually visible.
+    /// Progression to higher quality was tried (see git history) and was
+    /// either not visibly different or caused render cycle thrash.
+    private var imageQualityLevel: Int = 0
+    private var imageProgressionTask: Task<Void, Never>? = nil
+    private let imageProgressionStepSeconds: TimeInterval = 3.0
 
     /// Fetch the live `/v1/me/player` payload from Spotify and wrap it in the
     /// Pi connector's `cleanupWebSocketMessage`-style envelope. Returns nil
@@ -774,6 +801,13 @@ final class RPCManager: ObservableObject {
             //   REST `context.uri`                → cluster `context_uri`
             let json = try JSONSerialization.jsonObject(with: data)
             let restPlayer = MessagePackValue.wrap(json)
+            // Track-change detection (cosmetic for now — the progression
+            // task is a no-op; we always serve the medium URL).
+            let newTrackURI = restPlayer.mapValue("item")?.mapValue("uri")?.stringValue ?? ""
+            if !newTrackURI.isEmpty, newTrackURI != currentTrackURI {
+                currentTrackURI = newTrackURI
+            }
+            cachedRestPlayer = restPlayer
             let wrapped = await buildClusterFromRESTPlayer(restPlayer)
             cachedPlayerState = (wrapped, Date())
             cacheNeedsRefresh = false
@@ -791,6 +825,70 @@ final class RPCManager: ObservableObject {
     /// incomplete synthesized cluster.
     private func invalidatePlayerStateCache() {
         cacheNeedsRefresh = true
+    }
+
+    /// Pick the best image URL from Spotify's `item.album.images` array at a
+    /// given quality level. Spotify always returns the array large-to-small
+    /// (640 → 300 → 64).
+    private func pickImageURL(from imageList: [MessagePackValue], level: Int) -> String {
+        // Smallest (64x64): height <= 100.
+        // Medium (300x300): 200 <= height <= 400.
+        // Large (640x640): everything else, take first.
+        func smallURL() -> String? {
+            for img in imageList {
+                if let h = img.mapValue("height")?.intValue, h <= 100 {
+                    return img.mapValue("url")?.stringValue
+                }
+            }
+            return nil
+        }
+        func mediumURL() -> String? {
+            for img in imageList {
+                if let h = img.mapValue("height")?.intValue, h >= 200 && h <= 400 {
+                    return img.mapValue("url")?.stringValue
+                }
+            }
+            return nil
+        }
+        func largeURL() -> String? {
+            return imageList.first?.mapValue("url")?.stringValue
+        }
+        switch level {
+        case 0: return smallURL()  ?? mediumURL() ?? largeURL() ?? ""
+        case 1: return mediumURL() ?? largeURL()  ?? smallURL() ?? ""
+        default: return largeURL() ?? mediumURL() ?? smallURL() ?? ""
+        }
+    }
+
+    /// Launch the level-bump timer for a freshly-changed track. Cancels any
+    /// previous progression first.
+    ///
+    /// We start at level 1 (medium 300x300) — empirically the firmware
+    /// renders it reliably now that the protocol fixes are in place, and
+    /// 300x300 matches the 280x280 NowPlaying art slot 1:1. No small-first
+    /// dance, no bump to large — the small-first approach was a workaround
+    /// for an earlier protocol bug and just made the user see a blurry
+    /// upscale for the first few seconds. Large (640x640) reliably hangs
+    /// the firmware's color-extraction step on canvas.
+    private func startImageQualityProgression(for trackURI: String) {
+        imageProgressionTask?.cancel()
+        // No progression needed — the initial cluster build already used
+        // level 1 (medium). Keep the task slot reserved in case we want to
+        // reintroduce a fallback (e.g., if medium fails, downgrade to small)
+        // but for now do nothing.
+    }
+
+    /// Apply a quality-level upgrade by rebuilding the cached cluster from
+    /// the cached REST response (no Spotify call) and broadcasting it.
+    private func bumpImageQuality(to level: Int, forTrackURI trackURI: String) async {
+        // Re-check after the await suspension — the track may have changed.
+        guard currentTrackURI == trackURI else { return }
+        imageQualityLevel = level
+        guard let rest = cachedRestPlayer else { return }
+        let rebuilt = await buildClusterFromRESTPlayer(rest)
+        cachedPlayerState = (rebuilt, Date())
+        log.info("Image quality bumped to level \(level, privacy: .public) for \(trackURI, privacy: .public)")
+        await broadcastSpotifyState(reason: "PLAYER_STATE_CHANGED", force: true)
     }
 
     /// Returns the freshest `is_playing` flag we can get from Spotify Web —
@@ -857,29 +955,27 @@ final class RPCManager: ObservableObject {
         let title = item?.mapValue("name")?.stringValue ?? ""
         let artistName = artists.first?.mapValue("name")?.stringValue ?? ""
         let albumTitle = album?.mapValue("name")?.stringValue ?? ""
-        // Spotify returns three image sizes (640/300/64). The Car Thing's
-        // embedded WebView reliably renders the 64x64 size; 300x300 and
-        // 640x640 silently fail at the color-extraction step (img.onload
-        // never fires for ~30KB+ base64 data URLs in the WebView). 64x64
-        // up-scales to the 280x280 slot — softer than ideal but actually
-        // visible. TODO: progressive enhancement — serve 64x64 first then
-        // swap in the medium image once we know it's safe.
+        let albumURI = album?.mapValue("uri")?.stringValue ?? ""
+        // Build the `metadata.artists` array the firmware actually reads.
+        // (NowPlaying renders each artist as a separate clickable pill.)
+        // The firmware's transform takes `artists.map(a => ({id, uri, name, type}))`.
+        let artistsPacked: MessagePackValue = .array(artists.map { artist in
+            let id = artist.mapValue("id")?.stringValue ?? ""
+            let uri = artist.mapValue("uri")?.stringValue ?? (id.isEmpty ? "" : "spotify:artist:\(id)")
+            let name = artist.mapValue("name")?.stringValue ?? ""
+            return .map([
+                (.string("id"), .string(id)),
+                (.string("uri"), .string(uri)),
+                (.string("name"), .string(name)),
+                (.string("type"), .string("artist"))
+            ])
+        })
+        // Pick the image URL based on the current quality level. The level
+        // is bumped by `imageProgressionTask` after the small image has had
+        // a chance to render. If a larger image's color-extraction hangs in
+        // the WebView, the previously-painted smaller image stays visible.
         let imageList = album?.mapValue("images")?.arrayValue ?? []
-        let remoteImageURL: String = {
-            // Smallest first (height <= 100, picks the 64x64 thumbnail).
-            for img in imageList {
-                if let h = img.mapValue("height")?.intValue, h <= 100 {
-                    return img.mapValue("url")?.stringValue ?? ""
-                }
-            }
-            // Fall back to medium if no small version is returned.
-            for img in imageList {
-                if let h = img.mapValue("height")?.intValue, h >= 200 && h <= 400 {
-                    return img.mapValue("url")?.stringValue ?? ""
-                }
-            }
-            return imageList.first?.mapValue("url")?.stringValue ?? ""
-        }()
+        let remoteImageURL = pickImageURL(from: imageList, level: imageQualityLevel)
         // Keep the remote https URL — the firmware unconditionally prepends
         // `https://` to any image_url that doesn't start with `http`, which
         // turns a `data:image/...` URL into a broken `https://data:image/...`.
@@ -900,8 +996,13 @@ final class RPCManager: ObservableObject {
 
         let metadata: MessagePackValue = .map([
             (.string("title"), .string(title)),
+            // artist_name is the singular fallback for older firmware paths.
+            // metadata.artists is the array the current firmware actually
+            // renders for the artist row.
             (.string("artist_name"), .string(artistName)),
+            (.string("artists"), artistsPacked),
             (.string("album_title"), .string(albumTitle)),
+            (.string("album_uri"), .string(albumURI)),
             (.string("image_url"), .string(imageURL)),
             (.string("duration"), .int(Int64(durationMs)))
         ])
