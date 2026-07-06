@@ -2,6 +2,9 @@
 
 # Nocturne-Mac-Connector
 
+** THIS REPO IS SUNSETTED **
+This working repo was submitted as a PR and reworked by Shadow in the nocturne-connector release of ~4.0.7+ (verified). Works on Intel and ARM Macs. Kept public for memories.
+
 Control your Spotify (and eventually any media playing on your Mac) from
 the Spotify Car Thing — flashed with the [Nocturne firmware](https://github.com/usenocturne/nocturne).
 
